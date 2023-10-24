@@ -57,22 +57,6 @@ class Llama2System:
         
         output_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         return SimpleNamespace(output_text=output_text)
-
-    def text_loglikelihood(self, input_text, context_text):
-        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
-        context = self.tokenizer(context_text, return_tensors="pt").to(self.device)
-        ctx_len = len(context.input_ids[0])
-
-        labels = -100 * torch.ones_like(inputs['input_ids'])
-        labels[0][ctx_len:] = inputs['input_ids'][0][ctx_len:]
-
-        with torch.no_grad():
-            output = self.model(
-                input_ids=inputs['input_ids'], 
-                labels=inputs['input_ids'],
-            )
-
-        return output.loss
     
 
 class PromptedLlama2System(Llama2System):

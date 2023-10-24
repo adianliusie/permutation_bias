@@ -5,14 +5,8 @@ from types import SimpleNamespace
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import List
 
-from peft import PeftModel
-
 MODEL_URLS = {
-    'llama2-7b':'meta-llama/Llama-2-7b-hf',
-    'llama2-13b':'meta-llama/Llama-2-13b-hf',
-    'llama2-7b-chat':'meta-llama/Llama-2-7b-chat-hf',
-    'llama2-13b-chat':'meta-llama/Llama-2-13b-chat-hf',
-    'vicuna-7b':'lmsys/vicuna-7b-v1.5'
+    'falcon-instruct-7b':'tiiuae/falcon-7b-instruct',
 }
 
 class Llama2System:
@@ -22,15 +16,8 @@ class Llama2System:
         self.model = AutoModelForCausalLM.from_pretrained(system_url)
         if not device:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        if 'cuda' in device:
-            self.model = self.model.half()
         self.to(device)
         self.device = device
-
-    def load_peft_model(self, output_path):
-        self.model.to('cpu')
-        self.model = PeftModel.from_pretrained(self.model, output_path)
-        self.model.to(self.device)
 
     def to(self, device):
         self.device = device
@@ -51,28 +38,13 @@ class Llama2System:
 
         output_tokens = output[0]
         
+        print(output_tokens)
         input_tokens = inputs.input_ids[0]
         new_tokens = output_tokens[len(input_tokens):]
         assert torch.equal(output_tokens[:len(input_tokens)], input_tokens)
         
         output_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         return SimpleNamespace(output_text=output_text)
-
-    def text_loglikelihood(self, input_text, context_text):
-        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
-        context = self.tokenizer(context_text, return_tensors="pt").to(self.device)
-        ctx_len = len(context.input_ids[0])
-
-        labels = -100 * torch.ones_like(inputs['input_ids'])
-        labels[0][ctx_len:] = inputs['input_ids'][0][ctx_len:]
-
-        with torch.no_grad():
-            output = self.model(
-                input_ids=inputs['input_ids'], 
-                labels=inputs['input_ids'],
-            )
-
-        return output.loss
     
 
 class PromptedLlama2System(Llama2System):
@@ -90,7 +62,7 @@ class PromptedLlama2System(Llama2System):
 
         # Set up decoder prefix
         self.decoder_prefix = decoder_prefix  # e.g. 'Response' #'Summary'
-        #print(f"decoder prefix is {self.decoder_prefix}")
+        print(f"decoder prefix is {self.decoder_prefix}")
 
     def prompt_classifier_response(self, input_text, decoder_prefix=None):
         input_text = input_text + f" {self.decoder_prefix}"

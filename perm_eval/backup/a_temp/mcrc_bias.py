@@ -13,12 +13,6 @@ from src.utils.general import save_pickle
 
 from src.prompts import MCRC_TEMPLATES
 
-# PROMPT_TEMPLATES = [
-#     '{context}\n\n{question}\nA){option_1}\nB){option_2}\nC){option_3}\nD){option_4}',
-#     'Context: {context}\n\nQuestion:{question}\nA:{option_1}\nB:{option_2}\nC:{option_3}\nD:{option_4}',
-#     'Content{context}\n\nQuestion:{question}\nA){option_1}\nB){option_2}\nC){option_3}\nD){option_4}\n\nWhich option best answers the question: A, B, C or D?'
-# ]
-
 def run_mcrc_bias_search(
     dataset:str,
     system_name:str,
@@ -29,9 +23,7 @@ def run_mcrc_bias_search(
     prompt_templates = MCRC_TEMPLATES
     if 'llama' in system_name:
         prompt_templates = [template + '\n\nAnswer:' for template in prompt_templates]
-    
-    label_words = ['A', 'B', 'C', 'D']
-    
+        
     #== prepare MCRC dataset ================================================================================#
     _, _, data = load_mcrc_data(dataset, all_perm=True)
     

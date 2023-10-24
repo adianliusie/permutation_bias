@@ -1,107 +1,102 @@
 import torch
 import torch.nn.functional as F
 
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from types import SimpleNamespace
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from functools import lru_cache
 from typing import List
 
-from peft import PeftModel
-
 MODEL_URLS = {
-    'llama2-7b':'meta-llama/Llama-2-7b-hf',
-    'llama2-13b':'meta-llama/Llama-2-13b-hf',
-    'llama2-7b-chat':'meta-llama/Llama-2-7b-chat-hf',
-    'llama2-13b-chat':'meta-llama/Llama-2-13b-chat-hf',
-    'vicuna-7b':'lmsys/vicuna-7b-v1.5'
+    'flant5-base':'google/flan-t5-base',
+    'flant5-large':'google/flan-t5-large',
+    'flant5-xl':'google/flan-t5-xl',
+    'flant5-xxl':'google/flan-t5-xxl',
 }
 
-class Llama2System:
+class FlanT5System:
     def __init__(self, system_name:str, device=None):
         system_url = MODEL_URLS[system_name]
         self.tokenizer = AutoTokenizer.from_pretrained(system_url)
-        self.model = AutoModelForCausalLM.from_pretrained(system_url)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(system_url, return_dict=True)
         if not device:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        if 'cuda' in device:
-            self.model = self.model.half()
         self.to(device)
-        self.device = device
 
-    def load_peft_model(self, output_path):
-        self.model.to('cpu')
-        self.model = PeftModel.from_pretrained(self.model, output_path)
-        self.model.to(self.device)
+        # set up args for prompt template
+        self.decoder_ids = False
+        self.probs_setup = False
 
     def to(self, device):
         self.device = device
         self.model.to(self.device)
 
-    def text_response(self, input_text, top_k:int=10, do_sample:bool=False, max_new_tokens:int=None):
+    #== Output generation methods =================================================================#
+    def text_response(self, input_text, top_k:int=10, do_sample:bool=False, max_new_tokens:int=None, **kwargs):
         inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
 
+        #print(input_text)
+        #import time; time.sleep(2)
         with torch.no_grad():
             output = self.model.generate(
-                input_ids=inputs['input_ids'], 
+                input_ids=inputs['input_ids'],
                 attention_mask=inputs['attention_mask'],
                 top_k=top_k,
                 do_sample=do_sample,
                 max_new_tokens=max_new_tokens,
-                pad_token_id=self.tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id,
+                no_repeat_ngram_size=3
             )
 
         output_tokens = output[0]
-        
-        input_tokens = inputs.input_ids[0]
-        new_tokens = output_tokens[len(input_tokens):]
-        assert torch.equal(output_tokens[:len(input_tokens)], input_tokens)
-        
-        output_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        output_text = self.tokenizer.decode(output_tokens, skip_special_tokens=True).strip()
         return SimpleNamespace(output_text=output_text)
 
-    def text_loglikelihood(self, input_text, context_text):
-        inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
-        context = self.tokenizer(context_text, return_tensors="pt").to(self.device)
-        ctx_len = len(context.input_ids[0])
-
-        labels = -100 * torch.ones_like(inputs['input_ids'])
-        labels[0][ctx_len:] = inputs['input_ids'][0][ctx_len:]
-
-        with torch.no_grad():
-            output = self.model(
-                input_ids=inputs['input_ids'], 
-                labels=inputs['input_ids'],
-            )
-
-        return output.loss
-    
-
-class PromptedLlama2System(Llama2System):
+class PromptedFlanT5System(FlanT5System):
     def __init__(self, system_name:str, decoder_prefix:str, label_words:list, device=None):
         super().__init__(system_name=system_name, device=device) 
         self.set_up_prompt_classifier(decoder_prefix=decoder_prefix, label_words=label_words)
 
-    def set_up_prompt_classifier(self, decoder_prefix='Response', label_words=['A', 'B']):
+    def set_up_prompt_classifier(self, decoder_prefix='Response', label_words=[' A', ' B']):
         # Set up label words
         label_ids = [self.tokenizer(word, add_special_tokens=False).input_ids for word in label_words]
         if any([len(i)>1 for i in label_ids]):
             print('warning: some label words are tokenized to multiple words')
-        self.label_ids = [int(self.tokenizer(word, add_special_tokens=False).input_ids[-1]) for word in label_words]
+        self.label_ids = [int(self.tokenizer(word, add_special_tokens=False).input_ids[0]) for word in label_words]
         self.label_words = label_words
 
         # Set up decoder prefix
         self.decoder_prefix = decoder_prefix  # e.g. 'Response' #'Summary'
+        self.decoder_input_ids = self._get_decoder_ids()
         #print(f"decoder prefix is {self.decoder_prefix}")
 
-    def prompt_classifier_response(self, input_text, decoder_prefix=None):
-        input_text = input_text + f" {self.decoder_prefix}"
+    def _get_decoder_ids(self, bsz=1) -> List[int]:
+        if self.decoder_prefix:
+            # repeat template bsz times
+            decoder_input_ids = self.tokenizer(
+                [self.decoder_prefix for _ in range(bsz)],
+                return_tensors="pt",
+            ).input_ids
+
+            # add start token
+            decoder_input_ids = self.model._shift_right(decoder_input_ids)
+        else:
+            # set input to start of sentence token
+            decoder_input_ids = self.model.config.decoder_start_token_id * torch.ones(bsz, 1, dtype=torch.long)
+
+        decoder_input_ids = decoder_input_ids.to(self.device)
+        return decoder_input_ids
+    
+
+    def prompt_classifier_response(self, input_text):
         inputs = self.tokenizer(input_text, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             output = self.model(
                 input_ids=inputs.input_ids,
                 attention_mask=inputs.attention_mask,
+                decoder_input_ids=self.decoder_input_ids
             )
-        
+
         vocab_logits = output.logits[:,-1]
         #self.debug_output_logits(input_text, vocab_logits)
 
@@ -115,20 +110,14 @@ class PromptedLlama2System(Llama2System):
             logits=[float(i) for i in class_logits],
             raw_probs=[float(i) for i in raw_class_probs]
         )
-   
+
     def debug_output_logits(self, input_text, logits):
         # Debug function to see what outputs would be
         indices = logits.topk(k=5).indices[0]
-        print('\n\n', '-'*50, "\nINPUT TEXT\n", '-'*50, '\n')
         print(input_text)
-        print('\n\n', '-'*50, "\nSET LABEL IDS \n", '-'*50, '\n')
+        print('\n')
         print(self.label_ids)
-
-        print('\n\n', '-'*50, "\nTOP K IDS \n", '-'*50, '\n')
-        print(indices, '\n')
-        print(logits[0, indices], '\n')
-        print(self.tokenizer.decode(indices), '\n')
+        print(indices)
+        print(self.tokenizer.decode(indices))
         print('\n\n')
         import time; time.sleep(1)
-
-    #== Setup methods =============================================================================#
